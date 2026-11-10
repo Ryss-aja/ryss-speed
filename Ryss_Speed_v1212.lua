@@ -1939,6 +1939,7 @@ function Refs.looksLikeInv(v)
     return true
 end
 
+-- GANTI findRefs (pairs() bukan ipairs(), pcall getgc dengan fallback)
 local function findRefs()
     Refs.World, Refs.Inv, Refs.SetTile, Refs.State, Refs.Punch, Refs.Menu = nil, nil, nil, nil, nil, nil
     Refs.Gems = nil
@@ -1950,7 +1951,17 @@ local function findRefs()
     if not getgc then
         return false, "Executor tidak punya getgc()"
     end
-    for _, v in ipairs(getgc(true)) do
+    -- pairs() menggantikan ipairs() — aman untuk array berlubang dari getgc
+    local gcOk, objects = pcall(getgc, true)
+    if not gcOk or type(objects) ~= "table" then
+        gcOk, objects = pcall(getgc)
+    end
+    if not gcOk or type(objects) ~= "table" then
+        return false, "getgc gagal: " .. tostring(objects)
+    end
+    local scanCount = 0
+    for _, v in pairs(objects) do
+        scanCount += 1
         local tv = type(v)
         if tv == "table" then
             if not Refs.World then
@@ -1981,26 +1992,31 @@ local function findRefs()
             end
             if not Refs.Hud then
                 local ok, isH = pcall(function()
-                    return type(rawget(v, "punchRange")) == "function" and type(rawget(v, "handPower")) == "function"
+                    return type(rawget(v, "punchRange")) == "function"
+                        and type(rawget(v, "handPower")) == "function"
                 end)
                 if ok and isH then Refs.Hud = v end
             end
             if not Refs.Others then
-                -- data pemain lain: punya list(), where(), playerAt()
                 local ok, isO = pcall(function()
-                    return type(rawget(v, "list")) == "function" and type(rawget(v, "where")) == "function"
+                    return type(rawget(v, "list")) == "function"
+                        and type(rawget(v, "where")) == "function"
                         and type(rawget(v, "playerAt")) == "function"
                 end)
                 if ok and isO then Refs.Others = v end
             end
             if ParticlesOk then
                 local ok, isP = pcall(function()
-                    return getmetatable(v) == ParticlesModule and type(rawget(v, "live")) == "table"
+                    return getmetatable(v) == ParticlesModule
+                        and type(rawget(v, "live")) == "table"
                         and type(rawget(v, "free")) == "table"
                 end)
-                if ok and isP then table.insert(Refs.Particles, v) end
+                if ok and isP and not table.find(Refs.Particles, v) then
+                    table.insert(Refs.Particles, v)
+                end
             end
-        elseif tv == "function" and (not Refs.SetTile or not Refs.Punch) and isGameFn(v) then
+        elseif tv == "function" and (not Refs.SetTile or not Refs.Punch)
+            and v ~= isPunchFn and v ~= isSetTileFn and isGameFn(v) then
             if not Refs.SetTile and isSetTileFn(v) then
                 Refs.SetTile = v
             elseif not Refs.Punch and isPunchFn(v) then
@@ -2009,23 +2025,10 @@ local function findRefs()
         end
         if Refs.World and Refs.Inv and Refs.SetTile and Refs.State and Refs.Punch
             and Refs.Menu and Refs.Gems and Refs.Hud and Refs.Others then break end
+        if scanCount % 2000 == 0 then task.wait() end
     end
     return Refs.World ~= nil
 end
-
-local function refsText()
-    return "World: " .. (Refs.World and "OK" or "TIDAK")
-        .. " | Inventori: " .. (Refs.Inv and "OK" or "TIDAK")
-        .. " | setTile: " .. (Refs.SetTile and "OK" or "cadangan")
-        .. " | Posisi: " .. (Refs.State and "OK" or "cadangan")
-        .. " | Pukul: " .. (Refs.Punch and "OK" or "TIDAK")
-        .. " | Drop: " .. (Drops.list and "OK" or "TIDAK")
-        .. " | Pohon: " .. (Refs.Trees and "OK" or "TIDAK")
-        .. " | Pemain: " .. (Refs.Others and "OK" or "TIDAK")
-        .. " | Animasi: " .. (Anim.fn and "OK" or "TIDAK")
-        .. " | Dropdown: " .. (UI.DropErr and ("ERROR " .. tostring(UI.DropErr)) or (UI.DropOk and "OK" or "-"))
-end
-
 ---------------------------------------------------------------------
 -- ITEM & INVENTORI
 ---------------------------------------------------------------------
