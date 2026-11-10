@@ -1827,21 +1827,22 @@ local function isSetTileFn(fn)
 end
 
 -- Fungsi pukul game: teks "Empty the Vending Machine first!" + "newCrack"
--- GANTI isPunchFn (pakai find() bukan exact match)
+-- GANTI DENGAN INI:
 local function isPunchFn(fn)
     if not getconsts then return false end
     if islclosure and not islclosure(fn) then return false end
     local ok, consts = pcall(getconsts, fn)
     if not ok or type(consts) ~= "table" then return false end
-    local hasVend, hasMark = false, false
+    local hasVend, hasMark, hasCrack2 = false, false, false
     for _, c in pairs(consts) do
         if type(c) == "string" then
             local cl = c:lower()
             if cl:find("empty", 1, true) and cl:find("vending", 1, true) then hasVend = true end
+            if cl:find("crack", 1, true) or cl:find("harvest", 1, true) then hasCrack2 = true end
         end
         if c == "newCrack" or c == "HarvestProvider" then hasMark = true end
     end
-    return hasVend and hasMark
+    return hasVend and (hasMark or hasCrack2)
 end
 
 -- Fungsi game yang menggambar tangan karakter saat memukul / memasang
@@ -1890,51 +1891,27 @@ local function isStateHolder(v)
         and s.facing ~= nil and s.vx ~= nil
 end
 
--- GANTI isGameFn (accept PlayerScripts + ReplicatedStorage, bukan hanya GameGui)
+-- GANTI DENGAN INI:
 local function isGameFn(fn)
     if fn == isSetTileFn or fn == isPunchFn then return false end
     if isexecutorclosure then
         local ok, res = pcall(isexecutorclosure, fn)
         if ok and res then return false end
     end
-    -- cek sumber fungsi dari debug.info atau debug.getinfo
-    local sources = {}
     if debug and type(debug.info) == "function" then
         local ok, src = pcall(debug.info, fn, "s")
-        if ok and type(src) == "string" then sources[#sources + 1] = src end
-    end
-    if debug and type(debug.getinfo) == "function" then
-        local ok, info = pcall(debug.getinfo, fn, "S")
-        if ok and type(info) == "table" then
-            if type(info.source) == "string" then sources[#sources + 1] = info.source end
-            if type(info.short_src) == "string" then sources[#sources + 1] = info.short_src end
-        end
-    end
-    -- fungsi game bisa berasal dari 3 lokasi ini
-    for _, src in ipairs(sources) do
-        if src:find("GameGui", 1, true)
-            or src:find("PlayerScripts", 1, true)
-            or src:find("ReplicatedStorage", 1, true) then
+        if ok and type(src) == "string" and src ~= "" then
+            -- accept fungsi dari semua lokasi game
+            if src:find("GameGui", 1, true)
+                or src:find("PlayerScripts", 1, true)
+                or src:find("ReplicatedStorage", 1, true) then
+                return true
+            end
+            -- reject yang jelas bukan game
+            if src == "[C]" or src == "=[C]" then return false end
+            -- source ada tapi tidak dikenal → biarkan lolos (mungkin game)
             return true
         end
-    end
-    -- kalau tidak ada info sumber → exclude yang jelas bukan game
-    for _, src in ipairs(sources) do
-        if src == "[C]" or src == "=[C]" or src == "executor" then return false end
-    end
-    -- tidak ada debug info → anggap mungkin game function
-    return #sources == 0
-end
-
--- v1210: objek inventori tidak lagi bermetatable modul Inventory. Kenali lewat field-nya.
-function Refs.looksLikeInv(v)
-    if type(v) ~= "table" then return false end
-    if rawget(v, "capacity") == nil or rawget(v, "slots") == nil or rawget(v, "changed") == nil then
-        return false
-    end
-    if rawget(v, "frame") ~= nil or rawget(v, "label") ~= nil then return false end -- itu UI hotbar
-    if getmetatable(v) == nil then
-        pcall(setmetatable, v, InventoryModule) -- agar :count/:room/:remove/:add tetap jalan
     end
     return true
 end
