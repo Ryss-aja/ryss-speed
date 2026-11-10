@@ -1810,7 +1810,7 @@ end)() end
 local getconsts = (debug and debug.getconstants) or getconstants
 
 -- Fungsi place game: satu-satunya yang memakai "placedAt" + "flips" sekaligus.
--- Kirimnya "tile" (game baru, ByteNet) atau "SetTile" (game lama).
+-- GANTI isSetTileFn (tambah fallback partial match)
 local function isSetTileFn(fn)
     if not getconsts then return false end
     if islclosure and not islclosure(fn) then return false end
@@ -1822,11 +1822,12 @@ local function isSetTileFn(fn)
         elseif c == "placedAt" then hasPlaced = true
         elseif c == "flips" then hasFlips = true end
     end
-    return hasSend and hasPlaced and hasFlips
+    -- fallback: kalau placedAt belum ada, cek flips + send saja (versi game baru)
+    return hasSend and hasFlips and (hasPlaced or hasSend)
 end
 
 -- Fungsi pukul game: teks "Empty the Vending Machine first!" + "newCrack"
--- (game lama: "HarvestProvider")
+-- GANTI isPunchFn (pakai find() bukan exact match)
 local function isPunchFn(fn)
     if not getconsts then return false end
     if islclosure and not islclosure(fn) then return false end
@@ -1834,8 +1835,11 @@ local function isPunchFn(fn)
     if not ok or type(consts) ~= "table" then return false end
     local hasVend, hasMark = false, false
     for _, c in pairs(consts) do
-        if c == "Empty the Vending Machine first!" then hasVend = true
-        elseif c == "newCrack" or c == "HarvestProvider" then hasMark = true end
+        if type(c) == "string" then
+            local cl = c:lower()
+            if cl:find("empty", 1, true) and cl:find("vending", 1, true) then hasVend = true end
+        end
+        if c == "newCrack" or c == "HarvestProvider" then hasMark = true end
     end
     return hasVend and hasMark
 end
