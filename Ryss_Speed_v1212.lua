@@ -1890,18 +1890,40 @@ local function isStateHolder(v)
         and s.facing ~= nil and s.vx ~= nil
 end
 
--- Pastikan fungsi milik game, bukan milik script ini
+-- GANTI isGameFn (accept PlayerScripts + ReplicatedStorage, bukan hanya GameGui)
 local function isGameFn(fn)
     if fn == isSetTileFn or fn == isPunchFn then return false end
     if isexecutorclosure then
         local ok, res = pcall(isexecutorclosure, fn)
         if ok and res then return false end
     end
-    local ok, src = pcall(debug.info, fn, "s")
-    if ok and type(src) == "string" and src ~= "" and not string.find(src, "GameGui", 1, true) then
-        return false
+    -- cek sumber fungsi dari debug.info atau debug.getinfo
+    local sources = {}
+    if debug and type(debug.info) == "function" then
+        local ok, src = pcall(debug.info, fn, "s")
+        if ok and type(src) == "string" then sources[#sources + 1] = src end
     end
-    return true
+    if debug and type(debug.getinfo) == "function" then
+        local ok, info = pcall(debug.getinfo, fn, "S")
+        if ok and type(info) == "table" then
+            if type(info.source) == "string" then sources[#sources + 1] = info.source end
+            if type(info.short_src) == "string" then sources[#sources + 1] = info.short_src end
+        end
+    end
+    -- fungsi game bisa berasal dari 3 lokasi ini
+    for _, src in ipairs(sources) do
+        if src:find("GameGui", 1, true)
+            or src:find("PlayerScripts", 1, true)
+            or src:find("ReplicatedStorage", 1, true) then
+            return true
+        end
+    end
+    -- kalau tidak ada info sumber → exclude yang jelas bukan game
+    for _, src in ipairs(sources) do
+        if src == "[C]" or src == "=[C]" or src == "executor" then return false end
+    end
+    -- tidak ada debug info → anggap mungkin game function
+    return #sources == 0
 end
 
 -- v1210: objek inventori tidak lagi bermetatable modul Inventory. Kenali lewat field-nya.
