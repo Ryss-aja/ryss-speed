@@ -12356,7 +12356,8 @@ local function reconnect(show)
         task.wait() -- biar dropdown tampil dulu sebelum scan lengkap (scan menahan layar sebentar)
     end
     -- 2) scan lengkap
-    findRefs()
+    local refOk, refErr = pcall(findRefs)
+    if not refOk then warn("[Ryss Speed] findRefs error: " .. tostring(refErr)) end
     watchInventory()
     pcall(doInvRefresh, true) -- langsung di thread ini (thread INIT / antrian UI), bukan thread tombol
     findDropRefs(true)
