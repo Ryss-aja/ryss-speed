@@ -75,66 +75,523 @@ do
 end
 
 ---------------------------------------------------------------------
--- SERVICES & MODULE GAME
+-- SESSION DOWNLOAD HELPER
 ---------------------------------------------------------------------
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local VirtualUser = game:GetService("VirtualUser")
-local UserInputService = game:GetService("UserInputService")
-local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local WorldRemotes = ReplicatedStorage:WaitForChild("WorldRemotes")
--- Remote lama (versi game sebelum ByteNet). Hanya dipakai kalau fungsi baru tidak ada.
-local SetTileRemote = WorldRemotes:FindFirstChild("SetTile")
-
-local ItemDB = require(Shared.ItemDB)
-local InventoryModule = require(Shared.Inventory)
-local NetOk, Net = pcall(require, Shared.Net)
-
-local GameGui = PlayerGui:WaitForChild("GameGui")
-local ParticlesOk, ParticlesModule = pcall(require, GameGui:WaitForChild("Particles"))
-local MenuModOk, MenuModule = pcall(require, GameGui:WaitForChild("WorldMenu"))
-local RolesOk, RolesModule = pcall(require, Shared:FindFirstChild("Roles"))
-local SfxOk, SfxModule = pcall(require, Shared:FindFirstChild("Sfx"))
-
-local WindUI
-do
-    local urls = {
-        "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua",
-        "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua",
-    }
-    local function fetch(url)
-        local ok, res = pcall(function() return game:HttpGet(url) end)
-        if ok and type(res) == "string" and #res > 100 then return res end
-        ok, res = pcall(function() return game:HttpGet(url, true) end)
-        if ok and type(res) == "string" and #res > 100 then return res end
-        local req = (syn and syn.request) or (http and http.request) or http_request or request
-            or (fluxus and fluxus.request)
-        if type(req) == "function" then
-            local okR, r = pcall(req, { Url = url, Method = "GET" })
-            if okR and type(r) == "table" and type(r.Body) == "string" and #r.Body > 100 then return r.Body end
-        end
-        return nil
+function Session.download(url)
+    local lastError = "respons kosong"
+    local function checked(source)
+        if type(source) ~= "string" or source:match("^%s*$") then return nil, "respons kosong" end
+        if source:match("^%s*<") then return nil, "server mengirim HTML, bukan script/metadata" end
+        if source:match("^%s*[45]%d%d[:%s]") then return nil, source:sub(1, 120) end
+        return source
     end
-    local loadFn = loadstring or load
-    assert(type(loadFn) == "function", "[Ryss Speed] executor tidak punya loadstring")
-    for _, url in ipairs(urls) do
-        local body = fetch(url)
-        if body then
-            local fn = loadFn(body)
-            if fn then
-                local okW, lib = pcall(fn)
-                if okW and lib then
-                    WindUI = lib
-                    break
+    local ok, source = pcall(function() return game:HttpGet(url) end)
+    if ok then
+        local valid, reason = checked(source)
+        if valid then return valid end
+        lastError = reason
+    else lastError = tostring(source) end
+    local seen = {}
+    for _, api in ipairs({ request or false, http_request or false, (syn and syn.request) or false, (http and http.request) or false }) do
+        if type(api) == "function" and not seen[api] then
+            seen[api] = true
+            local sent, response = pcall(api, { Url = url, Method = "GET" })
+            if sent and type(response) == "table" then
+                local status = tonumber(response.StatusCode or response.Status)
+                if status and (status < 200 or status >= 300) then
+                    lastError = "HTTP " .. tostring(status)
+                else
+                    local valid, reason = checked(response.Body or response.body)
+                    if valid then return valid end
+                    lastError = reason
+                end
+            else lastError = tostring(response) end
+        end
+    end
+    error("[Ryss Speed] Unduh gagal: " .. tostring(lastError), 0)
+end
+
+print("[Ryss Speed] Memuat modul game...")
+task.delay(45, function()
+    if alive() and not Session.Ready then
+        warn("[Ryss Speed] Masih memuat: " .. tostring(Session.InitStep)
+            .. ". Kirim baris ini jika menu belum muncul.")
+    end
+end)
+
+---------------------------------------------------------------------
+-- SERVICES & MODULE GAME (robust loader — referensi n4th)
+---------------------------------------------------------------------
+local Players        = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService     = game:GetService("RunService")
+local VirtualUser    = game:GetService("VirtualUser")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer
+local PlayerGui
+local Shared, WorldRemotes, SetTileRemote
+local ItemDB, InventoryModule, NetOk, Net
+local GameGui, ParticlesOk, ParticlesModule, MenuModOk, MenuModule
+local RolesOk, RolesModule, SfxOk, SfxModule
+
+do
+    Session.InitStep = "menunggu LocalPlayer"
+    local deadline = os.clock() + 15
+    while not Players.LocalPlayer and os.clock() < deadline do task.wait(0.1) end
+    LocalPlayer = Players.LocalPlayer
+    assert(LocalPlayer, "[Ryss Speed] LocalPlayer belum tersedia. Masuk ke game lalu execute ulang.")
+
+    local indexed, seen, loaded = {}, {}, {}
+    local function isModule(object)
+        local ok, yes = pcall(function() return object:IsA("ModuleScript") end)
+        return ok and yes
+    end
+    local function add(object)
+        if isModule(object) and not seen[object] then
+            seen[object] = true
+            indexed[#indexed + 1] = object
+        end
+    end
+    local function refreshIndex()
+        indexed, seen, loaded = {}, {}, {}
+        for _, root in ipairs({ ReplicatedStorage, PlayerGui, LocalPlayer:FindFirstChild("PlayerScripts") or false }) do
+            if root then
+                local ok, descendants = pcall(root.GetDescendants, root)
+                if ok and type(descendants) == "table" then for _, obj in pairs(descendants) do add(obj) end end
+            end
+        end
+        local used = {}
+        for _, api in ipairs({ getloadedmodules or false, getmodules or false }) do
+            if type(api) == "function" and not used[api] then
+                used[api] = true
+                local ok, objects = pcall(api)
+                if ok and type(objects) == "table" then
+                    for key, value in pairs(objects) do
+                        local obj = isModule(value) and value or key
+                        add(obj)
+                        if api == getloadedmodules and isModule(obj) then loaded[obj] = true end
+                    end
                 end
             end
         end
     end
-    assert(WindUI, "[Ryss Speed] gagal memuat WindUI (cek koneksi / executor)")
+    local function findModule(parent, name)
+        if parent then
+            local direct = parent:FindFirstChild(name)
+            if isModule(direct) then return direct end
+            local found
+            for _, child in ipairs(parent:GetDescendants()) do
+                if child.Name == name and isModule(child) then
+                    if found then return nil, "lebih dari satu modul bernama " .. name end
+                    found = child
+                end
+            end
+            if found then return found end
+        end
+        local found
+        for _, obj in ipairs(indexed) do
+            if obj.Name == name then
+                if found then return nil, "lebih dari satu modul bernama " .. name .. " dalam daftar client" end
+                found = obj
+            end
+        end
+        return found
+    end
+
+    local function requiredChild(parent, name)
+        Session.InitStep = parent:GetFullName() .. "/" .. name
+        local child = parent:FindFirstChild(name) or parent:WaitForChild(name, 15)
+        assert(child, "[Ryss Speed] Tidak menemukan " .. Session.InitStep .. " setelah 15 detik.")
+        return child
+    end
+    PlayerGui   = requiredChild(LocalPlayer, "PlayerGui")
+    Shared      = ReplicatedStorage:FindFirstChild("Shared") or ReplicatedStorage
+    GameGui     = PlayerGui:FindFirstChild("GameGui")
+    Session.Modules = {}
+    refreshIndex()
+
+    local function report()
+        local folders, names = {}, {}
+        for _, child in ipairs(ReplicatedStorage:GetChildren()) do
+            folders[#folders + 1] = child.Name .. ":" .. child.ClassName
+        end
+        for _, obj in ipairs(indexed) do names[#names + 1] = obj.Name end
+        table.sort(folders); table.sort(names)
+        return ("Place=%s | Version=%s | ReplicatedStorage=%s | Modules=%d [%s] | loadedmodules=%s | getmodules=%s"):format(
+            tostring(game.PlaceId), tostring(game.PlaceVersion),
+            table.concat(folders, ", "):sub(1, 900),
+            #indexed, table.concat(names, ", "):sub(1, 1400),
+            type(getloadedmodules), type(getmodules))
+    end
+
+    local moduleDeadline   = os.clock() + 30
+    local structuralNames  = { "ItemDB", "Inventory", "Net", "WorldMenu", "Roles", "Sfx" }
+    local runtimeMatches, exportMatches, triedModules = {}, {}, {}
+    local lastGC, runtimeComplete, exportsComplete = -math.huge, false, false
+    Session.ModuleScan = { Tables = 0, Loaded = 0, Errors = 0 }
+
+    local function functions(value, fnames)
+        for _, fname in ipairs(fnames) do if type(rawget(value, fname)) ~= "function" then return false end end
+        return true
+    end
+    local function isItemDatabase(value)
+        local checked, entries, named, metadata, seeds, solids = 0, 0, 0, 0, 0, 0
+        for id, item in pairs(value) do
+            checked += 1
+            if type(id) == "number" and id >= 0 and id % 1 == 0 then
+                entries += 1
+                if type(item) == "table" and type(rawget(item, "name")) == "string" and rawget(item, "name") ~= "" then
+                    named += 1
+                    if type(rawget(item, "hits")) == "number" or type(rawget(item, "solid")) == "boolean"
+                        or rawget(item, "kind") == "seed" then metadata += 1 end
+                    if rawget(item, "kind") == "seed" then seeds += 1 end
+                    if rawget(item, "solid") == true then solids += 1 end
+                end
+            end
+            if checked >= 160 or entries >= 64 then break end
+        end
+        return entries >= 12 and named / entries >= 0.85 and metadata >= 8 and (seeds > 0 or solids >= 4)
+    end
+    local function matchesShape(name, value)
+        if type(value) ~= "table" then return false end
+        if name == "ItemDB"    then return isItemDatabase(value) end
+        if name == "Inventory" then return rawget(value, "capacity") == nil
+            and functions(value, { "new", "add", "remove", "count", "used", "room", "select" }) end
+        if name == "Net"       then return functions(value, { "call", "on", "worldTag" })
+            and type(rawget(value, "CALLS")) == "table" and type(rawget(value, "EVENTS")) == "table"
+            and type(rawget(value, "punch")) == "table"
+            and type(rawget(rawget(value, "punch"), "send")) == "function" end
+        if name == "WorldMenu" then return functions(value, { "mount", "isDown" })
+            and type(rawget(value, "SKINS")) == "table" and type(rawget(value, "KEYS")) == "table"
+            and type(rawget(value, "DEFAULT_SKIN")) == "number" end
+        if name == "Roles"     then return functions(value, { "isDeveloper", "isModerator", "isUndercover" }) end
+        if name == "Sfx"       then return functions(value, { "play", "playAt", "loop" }) end
+        return false
+    end
+    local function rememberMatch(target, name, value, object)
+        local prev = target[name]
+        if not prev then
+            target[name] = { Value = value, Object = object, Candidates = { { Value = value, Object = object } } }
+        elseif not rawequal(prev.Value, value) then
+            prev.Ambiguous = true
+            for _, c in ipairs(prev.Candidates) do if rawequal(c.Value, value) then return end end
+            if #prev.Candidates < 16 then prev.Candidates[#prev.Candidates + 1] = { Value = value, Object = object }
+            else prev.Truncated = true end
+        end
+    end
+    local function definitionEquals(a, b, visited, work, depth)
+        if rawequal(a, b) then return true end
+        if type(a) ~= "table" or type(b) ~= "table" or depth > 12 then return false end
+        local paired = visited[a]
+        if paired and paired[b] then return true end
+        if not paired then paired = {}; visited[a] = paired end
+        paired[b] = true
+        for key, val in pairs(a) do
+            work[1] += 1
+            if work[1] > 200000 or not definitionEquals(val, rawget(b, key), visited, work, depth + 1) then return false end
+        end
+        for key in pairs(b) do if rawget(a, key) == nil then return false end end
+        return true
+    end
+    local function containsDatabase(a, b)
+        local visited, work, checked = {}, { 0 }, 0
+        for id, definition in pairs(b) do
+            if type(id) == "number" and id >= 0 and id % 1 == 0 then
+                if not definitionEquals(rawget(a, id), definition, visited, work, 0) then return false end
+                checked += 1
+                if checked % 512 == 0 then
+                    if not alive() or os.clock() >= moduleDeadline then return false end
+                    task.wait()
+                end
+            end
+        end
+        return true
+    end
+    local function resolveDatabase(match)
+        if match.Truncated then return nil end
+        for _, candidate in ipairs(match.Candidates) do
+            local coherent = true
+            for _, other in ipairs(match.Candidates) do
+                if not containsDatabase(candidate.Value, other.Value) then coherent = false break end
+            end
+            if coherent then return candidate end
+        end
+    end
+    local function readUpvalues(fn)
+        for _, api in ipairs({ (debug and debug.getupvalues) or false, getupvalues or false }) do
+            if type(api) == "function" then
+                local ok, values = pcall(api, fn)
+                if ok and type(values) == "table" and next(values) then return values end
+            end
+        end
+        for _, api in ipairs({ (debug and debug.getupvalue) or false, getupvalue or false }) do
+            if type(api) == "function" then
+                local values = {}
+                for index = 1, 80 do
+                    local ok, first, second = pcall(api, fn, index)
+                    if not ok then break end
+                    if second ~= nil then values[index] = second else values[index] = first end
+                end
+                if next(values) then return values end
+            end
+        end
+        return {}
+    end
+    local function actionFunction(fn)
+        if fn == actionFunction then return false end
+        for _, api in ipairs({ (debug and debug.getconstants) or false, getconstants or false }) do
+            if type(api) == "function" then
+                local ok, values = pcall(api, fn)
+                if ok and type(values) == "table" then
+                    local tile, placed, flips, vending, crack = false, false, false, false, false
+                    for _, val in pairs(values) do
+                        if val == "tile" or val == "SetTile" then tile = true
+                        elseif val == "placedAt" then placed = true
+                        elseif val == "flips" then flips = true
+                        elseif val == "newCrack" or val == "HarvestProvider" then crack = true
+                        elseif type(val) == "string" and val:lower():find("empty", 1, true) and val:lower():find("vending", 1, true) then vending = true end
+                    end
+                    if (tile and placed and flips) or (vending and crack) then return true end
+                end
+            end
+        end
+        return false
+    end
+    local bindingTried, boundDatabase = false, nil
+    local function databaseFromActions()
+        if bindingTried then return boundDatabase end
+        bindingTried = true
+        if type(getconnections) ~= "function" then return nil end
+        local queue, seenQ, results = {}, {}, {}
+        local function push(val)
+            if (type(val) == "function" or type(val) == "table") and not seenQ[val] then
+                seenQ[val] = true; queue[#queue + 1] = val
+            end
+        end
+        local function inspectAction(fn, depth, visitedA)
+            if depth > 3 or visitedA[fn] then return end
+            visitedA[fn] = true
+            for _, val in pairs(readUpvalues(fn)) do
+                if type(val) == "table" then
+                    local ok, yes = pcall(isItemDatabase, val)
+                    if ok and yes then rememberMatch(results, "ItemDB", val) end
+                elseif type(val) == "function" then inspectAction(val, depth + 1, visitedA) end
+            end
+        end
+        for _, entry in ipairs({ { RunService, { "RenderStepped", "Heartbeat", "PreRender", "Stepped" } },
+            { UserInputService, { "InputBegan", "InputEnded", "TouchTap" } } }) do
+            for _, sigName in ipairs(entry[2]) do
+                local ok, signal = pcall(function() return entry[1][sigName] end)
+                if ok and signal then
+                    local got, connections = pcall(getconnections, signal)
+                    if got and type(connections) == "table" then
+                        for _, conn in pairs(connections) do
+                            local read, fn = pcall(function() return type(conn) == "function" and conn or conn.Function end)
+                            if read then push(fn) end
+                        end
+                    end
+                end
+            end
+        end
+        local idx = 1
+        while idx <= #queue and idx <= 900 and alive() and os.clock() < moduleDeadline do
+            local val = queue[idx]; idx += 1
+            if type(val) == "function" then
+                if actionFunction(val) then inspectAction(val, 0, {}) end
+                for _, uv in pairs(readUpvalues(val)) do push(uv) end
+            elseif not isItemDatabase(val) then
+                for _, member in pairs(val) do if type(member) == "function" then push(member) end end
+            end
+            if idx % 100 == 0 then task.wait() end
+        end
+        local found = results.ItemDB
+        if found then
+            local resolved = not found.Ambiguous and found or resolveDatabase(found)
+            if resolved then
+                boundDatabase = resolved.Value
+                Session.ModuleScan.DatabaseResolution = "upvalue fungsi punch/place pada koneksi game aktif"
+            end
+        end
+        return boundDatabase
+    end
+    local function inspectValue(target, value, object)
+        if type(value) ~= "table" then return end
+        for _, name in ipairs(structuralNames) do
+            local ok, yes = pcall(matchesShape, name, value)
+            if ok and yes then rememberMatch(target, name, value, object) end
+        end
+    end
+    local function scanRuntime(retry)
+        if runtimeComplete and not retry then return end
+        if os.clock() - lastGC < 3 or type(getgc) ~= "function" then return end
+        lastGC = os.clock()
+        local ok, objects = pcall(getgc, true)
+        if not ok or type(objects) ~= "table" then ok, objects = pcall(getgc) end
+        if not ok or type(objects) ~= "table" then return end
+        runtimeMatches = {}; runtimeComplete = true
+        local visited = 0
+        for _, val in pairs(objects) do
+            if not alive() or os.clock() >= moduleDeadline then runtimeComplete = false break end
+            if type(val) == "table" then Session.ModuleScan.Tables += 1; inspectValue(runtimeMatches, val) end
+            visited += 1
+            if visited % 1000 == 0 then task.wait() end
+        end
+        lastGC = os.clock()
+    end
+    local function clientModule(object)
+        local parent = object
+        for _ = 1, 40 do
+            if parent == ReplicatedStorage or parent == PlayerGui then return true end
+            if not parent then break end
+            parent = parent.Parent
+        end
+        return false
+    end
+    local function scanLoaded()
+        exportsComplete = true
+        for obj in pairs(loaded) do
+            if not alive() or os.clock() >= moduleDeadline then exportsComplete = false break end
+            if not triedModules[obj] and clientModule(obj) then
+                triedModules[obj] = true
+                Session.InitStep = "membaca export client " .. obj:GetFullName()
+                local done, ok, value = false, false, nil
+                local worker = task.spawn(function() ok, value = pcall(require, obj); done = true end)
+                local untilTime = math.min(moduleDeadline, os.clock() + 1)
+                while alive() and not done and os.clock() < untilTime do task.wait(0.05) end
+                if done and ok then
+                    Session.ModuleScan.Loaded += 1
+                    inspectValue(exportMatches, value, obj)
+                else
+                    Session.ModuleScan.Errors += 1
+                    Session.ModuleScan.LastError = obj:GetFullName() .. ": " .. (done and tostring(value):sub(1, 180) or "batas waktu membaca export")
+                    if not done and task.cancel and worker then pcall(task.cancel, worker) end
+                end
+                task.wait()
+            end
+        end
+    end
+    local function structuralModule(name, retry)
+        if not table.find(structuralNames, name) then return nil end
+        scanRuntime(retry)
+        local found = runtimeMatches[name]
+        if runtimeComplete and found and not found.Ambiguous then return found.Value, found.Object end
+        if runtimeComplete and found and name == "ItemDB" then
+            local resolved = resolveDatabase(found)
+            if resolved then
+                Session.ModuleScan.DatabaseResolution = "definisi identik/tercakup, kandidat=" .. #found.Candidates
+                return resolved.Value, resolved.Object
+            end
+        end
+        if name == "ItemDB" then
+            local val = databaseFromActions()
+            if val then return val end
+        end
+        scanLoaded()
+        found = exportMatches[name]
+        if exportsComplete and found then
+            if found.Ambiguous and name == "ItemDB" then
+                local resolved = resolveDatabase(found)
+                if resolved then return resolved.Value, resolved.Object end
+            end
+            if found.Ambiguous then return nil, nil, "beberapa export cocok dengan bentuk " .. name end
+            return found.Value, found.Object
+        end
+        if runtimeMatches[name] and runtimeMatches[name].Ambiguous then
+            return nil, nil, "beberapa tabel runtime cocok dengan bentuk " .. name
+        end
+    end
+    local function loadModule(parent, name, required)
+        Session.InitStep = "mencari modul " .. name
+        local object, reason = findModule(parent, name)
+        local value, shapedObject
+        if not object and not reason then value, shapedObject, reason = structuralModule(name) end
+        while not object and not reason and required and alive() and os.clock() < moduleDeadline do
+            if value then break end
+            if parent then parent:WaitForChild(name, math.min(1, moduleDeadline - os.clock()))
+            else task.wait(0.25) end
+            task.wait(0.1)
+            refreshIndex()
+            object, reason = findModule(parent, name)
+            if not object and not reason then value, shapedObject, reason = structuralModule(name, true) end
+        end
+        if value then
+            Session.Modules[name] = shapedObject and shapedObject:GetFullName() or "runtime:" .. name
+            print("[Ryss Speed] " .. name .. " dikenali dari data: " .. Session.Modules[name])
+            return true, value, shapedObject
+        end
+        if object then
+            Session.InitStep = "memuat " .. object:GetFullName()
+            local ok, result = pcall(require, object)
+            if ok and type(result) == "table" then
+                Session.Modules[name] = object:GetFullName()
+                return true, result, object
+            end
+            reason = ok and "hasil require bukan tabel" or tostring(result)
+        end
+        local message = "[Ryss Speed] Modul " .. name .. ": " .. (reason or (required and "tidak ditemukan setelah 30 detik" or "tidak ditemukan"))
+        if required then
+            Session.BootstrapReport = report()
+            warn("[Ryss Speed] Struktur client: " .. Session.BootstrapReport)
+            warn(("[Ryss Speed] Scan: tabel=%d | export=%d | gagal=%d | terakhir=%s"):format(
+                Session.ModuleScan.Tables, Session.ModuleScan.Loaded, Session.ModuleScan.Errors, tostring(Session.ModuleScan.LastError)))
+            error(message, 0)
+        end
+        warn(message .. " (opsional, lanjut memuat menu)")
+        return false, nil
+    end
+    function Session.findModule(name, parent)
+        refreshIndex()
+        return findModule(parent or Shared, name)
+    end
+
+    WorldRemotes  = ReplicatedStorage:FindFirstChild("WorldRemotes")
+    SetTileRemote = WorldRemotes and WorldRemotes:FindFirstChild("SetTile")
+
+    local _, itemDB, itemModule = loadModule(Shared, "ItemDB", true)
+    ItemDB = itemDB
+    Shared = (itemModule and itemModule.Parent) or Shared
+
+    local _, inv   = loadModule(Shared, "Inventory", false); InventoryModule = inv
+    NetOk, Net     = loadModule(Shared, "Net", false)
+    ParticlesOk, ParticlesModule = loadModule(GameGui, "Particles", false)
+    local menuObject
+    MenuModOk, MenuModule, menuObject = loadModule(GameGui, "WorldMenu", false)
+    if not GameGui and menuObject then GameGui = menuObject.Parent end
+    RolesOk, RolesModule = loadModule(Shared, "Roles", false)
+    SfxOk, SfxModule     = loadModule(Shared, "Sfx", false)
+    Session.InitStep = "modul game siap"
+end
+
+Session.InitStep = "WindUI"
+local WindUI
+do
+    local urls = {
+        "https://raw.githubusercontent.com/Footagesus/WindUI/1.6.66/dist/main.lua",
+        "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua",
+    }
+    local function downloadWindUI()
+        local lastError = "respons kosong"
+        for attempt = 1, 2 do
+            for _, url in ipairs(urls) do
+                local ok, source = pcall(Session.download, url)
+                if not ok then
+                    lastError = tostring(source)
+                elseif type(source) ~= "string" or source:match("^%s*$") then
+                    lastError = "respons kosong"
+                elseif source:match("^%s*<") then
+                    lastError = "server mengirim HTML bukan Lua"
+                else
+                    local compiled, fn, compileErr = pcall(loadstring, source, "WindUI")
+                    if compiled and type(fn) == "function" then return fn end
+                    lastError = tostring(compiled and compileErr or fn)
+                end
+                warn("[Ryss Speed] Unduh WindUI gagal: " .. url .. " | " .. lastError)
+            end
+            if attempt < 2 then task.wait(1) end
+        end
+        error("[Ryss Speed] WindUI gagal diunduh setelah mencoba kedua URL: " .. lastError, 0)
+    end
+    WindUI = downloadWindUI()()
 end
 
 ---------------------------------------------------------------------
