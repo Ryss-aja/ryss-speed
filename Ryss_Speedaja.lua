@@ -12902,3 +12902,119 @@ Session.Cleanup = function()
     pcall(function() FlyPad:Destroy() end)
     pcall(function() Window:Destroy() end)
 end
+-- =====================================================================
+-- PATCH v1217: AUTO-HEALING MODULE (Pemulihan Otomatis Pasca-Update)
+-- =====================================================================
+do
+    local lastHeal = 0
+    local healing = false
+
+    local function getConsts(fn)
+        local api = (debug and debug.getconstants) or getconstants
+        if type(api) ~= "function" then return {} end
+        local ok, consts = pcall(api, fn)
+        return ok and consts or {}
+    end
+
+    local function isSetTileFn(fn)
+        if type(fn) ~= "function" then return false end
+        local consts = getConsts(fn)
+        local hasTile, hasPlaced, hasFlips = false, false, false
+        for _, c in pairs(consts) do
+            if c == "tile" or c == "SetTile" then hasTile = true
+            elseif c == "placedAt" then hasPlaced = true
+            elseif c == "flips" then hasFlips = true end
+        end
+        return hasTile and hasPlaced and hasFlips
+    end
+
+    local function isPunchFn(fn)
+        if type(fn) ~= "function" then return false end
+        local consts = getConsts(fn)
+        local hasVend, hasMark = false, false
+        for _, c in pairs(consts) do
+            if type(c) == "string" and c:lower():find("empty", 1, true) and c:lower():find("vending", 1, true) then
+                hasVend = true
+            elseif c == "newCrack" or c == "HarvestProvider" then
+                hasMark = true
+            end
+        end
+        return hasVend and hasMark
+    end
+
+    local function isInventoryTable(t)
+        if type(t) ~= "table" then return false end
+        local capacity = rawget(t, "capacity")
+        local slots = rawget(t, "slots")
+        if type(capacity) ~= "number" or type(slots) ~= "table" then return false end
+        if type(t.count) == "function" and type(t.remove) == "function" and type(t.add) == "function" then
+            return true
+        end
+        return false
+    end
+
+    -- Fungsi utama penyembuh memori
+    local function AutoHeal()
+        if healing or not getgc then return end
+        healing = true
+        print("[Auto-Healing] Memori game berubah. Memulai pemindaian ulang...")
+
+        local ok, objects = pcall(getgc, true)
+        if not ok then ok, objects = pcall(getgc) end
+        if not ok or type(objects) ~= "table" then
+            healing = false
+            return
+        end
+
+        local foundSetTile, foundPunch, foundInv = nil, nil, nil
+        local scanCount = 0
+
+        for _, v in pairs(objects) do
+            scanCount = scanCount + 1
+            
+            if type(v) == "function" then
+                if not foundPunch and isPunchFn(v) then
+                    foundPunch = v
+                elseif not foundSetTile and isSetTileFn(v) then
+                    foundSetTile = v
+                end
+            elseif type(v) == "table" and not foundInv then
+                if isInventoryTable(v) then
+                    foundInv = v
+                end
+            end
+
+            -- Jika ketiganya sudah ketemu, hentikan pencarian
+            if foundSetTile and foundPunch and foundInv then break end
+            
+            -- Beri napas script tiap 5000 objek agar tidak lag
+            if scanCount % 5000 == 0 then task.wait() end
+        end
+
+        -- Pasang kembali referensi yang berhasil ditemukan
+        if foundSetTile then Refs.SetTile = foundSetTile end
+        if foundPunch then Refs.Punch = foundPunch end
+        if foundInv then 
+            Refs.Inv = foundInv
+            pcall(function() watchInventory() end) -- pasang ulang pengawas inventori
+        end
+
+        print(string.format("[Auto-Healing] Selesai! SetTile: %s | Punch: %s | Inv: %s", 
+            tostring(foundSetTile ~= nil), tostring(foundPunch ~= nil), tostring(foundInv ~= nil)))
+        
+        healing = false
+    end
+
+    -- Loop pengawas: Jika fungsi pukul atau pasang block hilang, picu Auto-Heal
+    task.spawn(function()
+        while task.wait(3) do
+            if not healing and (not Refs.Punch or not Refs.SetTile or not Refs.Inv) then
+                -- Beri jeda 10 detik agar tidak spam scan jika game memang belum selesai loading
+                if os.clock() - lastHeal > 10 then
+                    lastHeal = os.clock()
+                    task.spawn(AutoHeal)
+                end
+            end
+        end
+    end)
+end
