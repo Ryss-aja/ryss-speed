@@ -12763,5 +12763,255 @@ Session.Cleanup = function()
     end
     pcall(function() GridGui:Destroy() end)
     pcall(function() FlyPad:Destroy() end)
+    safe(function()
+        dMain:Button({
+            Title = "Tes kirim",
+            Callback = function()
+                if not Hook.valid(Hook.Url) then
+                    notify("Discord", "Isi URL webhook dulu", 3)
+                    return
+                end
+                local was = Hook.On
+                Hook.On = true
+                Hook.send("test", "Tes notifikasi dari Ryss Speed")
+                Hook.On = was
+                notify("Discord", "Pesan tes masuk antrian", 3)
+            end,
+        })
+    end)
+
+    addNumber(dMain, {
+        Title = "Laporan statistik (menit)",
+        Desc = "Kirim statistik sesi tiap X menit. 0 = mati",
+        Min = 0, Max = 180, Step = 5, Default = Hook.ReportMin,
+        Callback = function(v) Hook.ReportMin = math.floor(v) end,
+    })
+
+    for _, item in ipairs({
+        { "Penjaga", "Mod / Dev / pemain masuk world" },
+        { "Stop", "Aktivitas berhenti (block habis / error)" },
+        { "Full", "Inventori penuh" },
+        { "Bonus", "Quest diklaim / redeem berhasil" },
+        { "Rejoin", "Terlempar / disconnect / masuk lagi" },
+        { "Pabrik", "Pabrik drop seed / lahan selesai / berhenti" },
+    }) do
+        safe(function()
+            dWhat:Toggle({
+                Title = item[2],
+                Value = Hook[item[1]],
+                Callback = function(on) Hook[item[1]] = on end,
+            })
+        end)
+    end
+end)() end
+
+
+---------------------------------------------------------------------
+-- INIT
+---------------------------------------------------------------------
+-- Thread pekerjaan UI: dibuat di sini (sama seperti thread status yang terbukti bisa mengubah UI).
+-- Callback tombol / event game di sebagian executor tidak punya izin mengubah dropdown.
+do
+    task.spawn(function()
+        while alive() do
+            local ok, err = pcall(UI.runJobs)
+            if not ok then warn("[Ryss Speed] UI runner: " .. tostring(err)) end
+            task.wait(0.1)
+        end
+    end)
+end
+
+task.spawn(function()
+    reconnect("Ryss Speed v5.2")
+    -- Penjaga dari config dinyalakan setelah data pemain ketemu
+    -- (supaya pemain yang sudah ada dicatat dulu)
+    if Config.saved("Penjaga", "On") == true and alive() then
+        if UI.GuardToggle then pcall(function() UI.GuardToggle:Set(true) end) end
+        if not Guard.On then Guard.set(true) end
+    end
+    Config.start()
+    if State.FpsBoost then pcall(UI.setFps, true) end
+    if State.No3D then pcall(UI.setNo3D, true) end
+    if (State.FpsCap or 0) > 0 then pcall(UI.setFpsCap, State.FpsCap) end
+    -- habis rejoin server: lanjutkan aktivitas sebelumnya
+    Rejoin.startup(reconnect)
+end)
+
+task.spawn(function()
+    while alive() do
+        if not State.Running then updateStatus() end
+        Auto.updateClearStatus()
+        Auto.updateFarmerStatus()
+        updateSpamStatus()
+        if UI.ConfigStatus and Config.Status ~= Config.Shown then
+            Config.Shown = Config.Status
+            pcall(function() UI.ConfigStatus:SetDesc(Config.Status) end)
+        end
+        local rj = ("%s\nWorld tujuan: %s\nBerhasil masuk lagi: %d kali"):format(
+            Rejoin.Status, (Rejoin.targetWorld and Rejoin.targetWorld() ~= "") and Rejoin.targetWorld() or "-", Rejoin.Count)
+        if UI.RejoinStatus and rj ~= Rejoin.Shown then
+            Rejoin.Shown = rj
+            pcall(function() UI.RejoinStatus:SetDesc(rj) end)
+        end
+        local hk = ("%s\nAntrian: %d pesan"):format(Hook.Status, #Hook.Queue)
+        if UI.HookStatus and hk ~= Hook.Shown then
+            Hook.Shown = hk
+            pcall(function() UI.HookStatus:SetDesc(hk) end)
+        end
+        task.wait(1)
+    end
+end)
+
+---------------------------------------------------------------------
+-- CLEANUP (otomatis saat script dijalankan ulang)
+---------------------------------------------------------------------
+Session.Cleanup = function()
+    State.Running = false
+    Clear.Running = false
+    Farmer.Running = false
+    Spam.On = false
+    if Config.AutoSave then pcall(Config.save, false) end -- simpan sebelum ditutup
+    Guard.On = false
+    Bonus.Quest, Bonus.Redeem = false, false
+    Scan.Auto = false
+    Splice.Running = false
+    Rejoin.On = false
+    Pabrik.Running = false
+    Build.Running = false
+    State.Override = nil
+    pcall(Auto.stopWalk)
+    AutoInput.active = false
+    pcall(Auto.releaseInput)
+    for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+    -- kembalikan nama asli (watermark dilepas)
+    Misc.CustomName = false
+    pcall(nameRestore)
+    -- kembalikan fungsi game ke asal
+    pcall(UI.setFps, false)
+    pcall(function() RunService:Set3dRenderingEnabled(true) end)
+    pcall(setLite, false)
+    pcall(unhookJammer)
+    if OrigIsDown and MenuModOk and rawget(MenuModule, "isDown") == isDownWrapper then
+        MenuModule.isDown = OrigIsDown
+    end
+    if Refs.World then
+        if Misc.Ghost then pcall(function() Refs.World.ghost = false end) end
+        if Misc.Speed ~= 100 then pcall(function() Refs.World.speedScale = 1 end) end
+    end
+    pcall(function() GridGui:Destroy() end)
+    pcall(function() FlyPad:Destroy() end)
     pcall(function() Window:Destroy() end)
+end
+-- =====================================================================
+-- PATCH v1215: AUTO-PLANT LAHAN & DROP 1-KLIK (Tanpa Loader)
+-- =====================================================================
+
+-- 1. TANAM OTOMATIS SETELAH BANGUN LAHAN SELESAI
+if Build and Build.start then
+    local oldBuildStart = Build.start
+    function Build.start()
+        Build.ThenPabrik = true -- Paksa lanjut tanam setelah lahan jadi
+        if Build.BlockId then
+            local s = seedOfBlock(Build.BlockId)
+            if s then Pabrik.SeedId = s end
+        end
+        oldBuildStart()
+    end
+end
+
+-- 2. AUTO-DROP OK (TANPA KLIK MANUAL)
+do
+    local VIM
+    pcall(function() VIM = game:GetService("VirtualInputManager") end)
+    local GuiService = game:GetService("GuiService")
+    local CoreGuiSvc = game:GetService("CoreGui")
+    local LP = Players.LocalPlayer
+
+    local function isOkText(t)
+        t = string.lower(t or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        return t == "ok" or t == "oke" or t == "okay" or t == "okey" or t == "confirm" or t == "konfirmasi" or t == "yes" or t == "ya"
+    end
+
+    local function isVisible(o)
+        if not o or not o.Parent then return false end
+        local cur = o
+        while cur and cur ~= game do
+            local ok, v = pcall(function() return cur.Visible end)
+            if ok and v == false then return false end
+            local okE, en = pcall(function() return cur.Enabled end)
+            if okE and en == false then return false end
+            cur = cur.Parent
+        end
+        return true
+    end
+
+    local function pressBtn(btn)
+        if not (btn and btn.Parent) then return false end
+        local fired = false
+        if getconnections then
+            for _, sig in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
+                local ok, conns = pcall(getconnections, btn[sig])
+                if ok and type(conns) == "table" then
+                    for _, c in ipairs(conns) do
+                        if c.Fire then pcall(c.Fire, c) fired = true
+                        elseif c.Function then pcall(c.Function) fired = true end
+                    end
+                end
+            end
+        end
+        if not fired and firesignal then
+            for _, sig in ipairs({ "Activated", "MouseButton1Click" }) do
+                if pcall(firesignal, btn[sig]) then fired = true end
+            end
+        end
+        if not fired and VIM and btn.AbsoluteSize.X > 0 then
+            pcall(function()
+                local inset = GuiService:GetGuiInset()
+                local x = btn.AbsolutePosition.X + btn.AbsoluteSize.X / 2
+                local y = btn.AbsolutePosition.Y + btn.AbsoluteSize.Y / 2 + inset.Y
+                VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.02)
+                VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+            fired = true
+        end
+        return fired
+    end
+
+    local function findAndPressOK()
+        local roots = { LP:FindFirstChild("PlayerGui"), CoreGuiSvc }
+        local okH, hidden = pcall(function() return gethui and gethui() end)
+        if okH and hidden then table.insert(roots, hidden) end
+
+        for _, root in ipairs(roots) do
+            if root then
+                local ok, list = pcall(function() return root:GetDescendants() end)
+                if ok and type(list) == "table" then
+                    for _, obj in ipairs(list) do
+                        if obj:IsA("TextButton") and isVisible(obj) and isOkText(obj.Text) then
+                            return pressBtn(obj)
+                        elseif obj:IsA("ImageButton") and isVisible(obj) then
+                            for _, child in ipairs(obj:GetChildren()) do
+                                if (child:IsA("TextLabel") or child:IsA("TextBox")) and isOkText(child.Text) then
+                                    return pressBtn(obj)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    -- Jalankan pengecekan background
+    task.spawn(function()
+        while State and State.DropOneTap do
+            if findAndPressOK() then
+                task.wait(0.3)
+            else
+                task.wait(0.05)
+            end
+        end
+    end)
 end
